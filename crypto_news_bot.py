@@ -220,15 +220,26 @@ def remember_for_digest(item):
 
 
 async def publish_alert(channel, item):
+    link = item["link"]
+    if not link.startswith(("http://", "https://")):
+        link = None
     embed = discord.Embed(
         title=item["title"][:256],
-        url=item["link"],
+        url=link,
         description=impact_summary(item["title"], item["categories"], item["score"]),
         color=discord.Color.red() if item["score"] >= 85 else discord.Color.orange()
     )
     embed.add_field(name="Źródło", value=item["source"][:1024], inline=True)
     embed.set_footer(text=f"Crypto News Desk | Europe/Warsaw | {datetime.datetime.now(TZ_POLAND).strftime('%Y-%m-%d %H:%M')}")
-    await channel.send(embed=embed)
+    try:
+        await channel.send(embed=embed)
+    except discord.Forbidden:
+        text = (
+            f"**{item['title']}**\n"
+            f"{impact_summary(item['title'], item['categories'], item['score'])}\n"
+            f"Źródło: {item['source']}\n{item['link']}"
+        )
+        await channel.send(text[:1900])
 
 
 async def run_feed_scan(publish=True, publish_all=False, max_publish=MAX_PUBLISH_PER_SCAN):
@@ -243,6 +254,8 @@ async def run_feed_scan(publish=True, publish_all=False, max_publish=MAX_PUBLISH
     fetched_items = await asyncio.to_thread(fetch_feed_items)
     new_items = []
     published = 0
+    failed = 0
+    errors = []
     for item in fetched_items:
         if item["id"] in STATE.get("seen", {}):
             continue
@@ -250,14 +263,22 @@ async def run_feed_scan(publish=True, publish_all=False, max_publish=MAX_PUBLISH
         remember_for_digest(item)
         new_items.append(item)
         if publish and published < max_publish and (publish_all or item["score"] >= ALERT_SCORE_THRESHOLD):
-            await publish_alert(channel, item)
-            published += 1
+            try:
+                await publish_alert(channel, item)
+                published += 1
+            except Exception as exc:
+                failed += 1
+                error_text = f"{item['title'][:80]} -> {type(exc).__name__}: {exc}"
+                errors.append(error_text)
+                print(f"Błąd publikacji alertu: {error_text}")
             await asyncio.sleep(1)
     save_state()
     return {
         "fetched": len(fetched_items),
         "new": len(new_items),
         "published": published,
+        "failed": failed,
+        "errors": errors[:3],
         "max_publish": max_publish,
         "threshold": ALERT_SCORE_THRESHOLD,
         "reason": None,
@@ -356,8 +377,10 @@ async def slash_news_scan(interaction: discord.Interaction, publish_all: bool = 
             f"Pobrane wpisy: `{result['fetched']}`\n"
             f"Nowe wpisy: `{result['new']}`\n"
             f"Opublikowane alerty: `{result['published']}`\n"
+            f"Nieudane publikacje: `{result['failed']}`\n"
             f"Limit publikacji na skan: `{result['max_publish']}`\n"
             f"Próg alertu: `{result['threshold']}`"
+            + (("\n\nBłędy:\n" + "\n".join(f"- {e}" for e in result["errors"])) if result["errors"] else "")
         )
     )
 

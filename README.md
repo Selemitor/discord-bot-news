@@ -8,6 +8,8 @@ Osobny bot Discord do filtrowania i publikowania najważniejszych newsów z rynk
 - scoring ważności 0-100,
 - deduplikacja newsów,
 - alerty tylko powyżej progu ważności,
+- obrazki z RSS, jeśli źródło je udostępnia,
+- opcjonalne tłumaczenie tytułów przez DeepL,
 - digest o wybranych godzinach,
 - komendy `/news_scan`, `/news_digest`, `/news_status`, `/news_reset`.
 
@@ -27,6 +29,9 @@ NEWS_MAX_PUBLISH_PER_SCAN=5
 NEWS_DIGEST_HOURS=9,21
 NEWS_FEED_POLL_MINUTES=10
 NEWS_STATE_FILE=crypto_news_state.json
+NEWS_TRANSLATE_TITLES=false
+DEEPL_API_KEY=
+DEEPL_API_URL=https://api-free.deepl.com/v2/translate
 PYTHONUNBUFFERED=1
 ```
 
@@ -78,6 +83,19 @@ Do testów można użyć:
 ```
 
 Domyślnie jeden skan publikuje maksymalnie 5 alertów. Limit zmienisz przez `NEWS_MAX_PUBLISH_PER_SCAN`.
+
+## Obrazki i tłumaczenie
+
+Bot automatycznie dołącza obrazek do embeda, jeśli feed RSS zwraca `media:content`, `media:thumbnail`, enclosure z obrazem albo obrazek w HTML summary.
+
+Tłumaczenie tytułów jest domyślnie wyłączone, żeby nie generować kosztów i opóźnień. Aby włączyć tłumaczenie przez DeepL:
+
+```text
+NEWS_TRANSLATE_TITLES=true
+DEEPL_API_KEY=twój_klucz_deepl
+```
+
+Tłumaczone są tylko tytuły publikowanych alertów, nie wszystkie wpisy z RSS.
 
 ## Ważne
 

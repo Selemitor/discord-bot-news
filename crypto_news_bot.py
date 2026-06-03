@@ -1,9 +1,10 @@
-# Plik: crypto_news_bot.py
+﻿# Plik: crypto_news_bot.py
 # Osobny bot Discord do filtrowania i publikowania ważnych newsów krypto.
 
 import asyncio
 import datetime
 import hashlib
+import html
 import json
 import os
 import re
@@ -36,6 +37,9 @@ BOT_TOKEN = os.environ.get("NEWS_BOT_TOKEN") or os.environ.get("BOT_TOKEN")
 NEWS_CHANNEL_ID = int(os.environ.get("NEWS_CHANNEL_ID", "0"))
 ALERT_SCORE_THRESHOLD = int(os.environ.get("NEWS_ALERT_SCORE_THRESHOLD", "70"))
 MAX_PUBLISH_PER_SCAN = int(os.environ.get("NEWS_MAX_PUBLISH_PER_SCAN", "5"))
+TRANSLATE_TITLES = os.environ.get("NEWS_TRANSLATE_TITLES", "false").lower() in ("1", "true", "yes", "on")
+DEEPL_API_KEY = os.environ.get("DEEPL_API_KEY")
+DEEPL_API_URL = os.environ.get("DEEPL_API_URL", "https://api-free.deepl.com/v2/translate")
 DIGEST_HOURS = [int(h) for h in os.environ.get("NEWS_DIGEST_HOURS", "9,21").split(",") if h.strip()]
 FEED_POLL_MINUTES = int(os.environ.get("NEWS_FEED_POLL_MINUTES", "10"))
 STATE_FILE = Path(os.environ.get("NEWS_STATE_FILE", "crypto_news_state.json"))
@@ -63,6 +67,7 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 STATE = {"seen": {}, "digest_items": [], "last_digest": {}}
 FEED_STATS = {"last_scan": None, "feeds": [], "fetched": 0}
+TRANSLATION_CACHE = {}
 
 
 CATEGORY_RULES = {
@@ -117,6 +122,59 @@ def cleanup_state():
 
 def normalize_text(value):
     return re.sub(r"\s+", " ", value or "").strip()
+
+
+def get_entry_image_url(entry):
+    media_content = entry.get("media_content") or []
+    for media in media_content:
+        url = media.get("url")
+        media_type = media.get("type", "")
+        if url and ("image" in media_type or re.search(r"\.(jpg|jpeg|png|webp)(\?|$)", url, re.I)):
+            return url
+
+    media_thumbnail = entry.get("media_thumbnail") or []
+    for media in media_thumbnail:
+        if media.get("url"):
+            return media["url"]
+
+    enclosures = entry.get("enclosures") or []
+    for enclosure in enclosures:
+        url = enclosure.get("href") or enclosure.get("url")
+        enc_type = enclosure.get("type", "")
+        if url and ("image" in enc_type or re.search(r"\.(jpg|jpeg|png|webp)(\?|$)", url, re.I)):
+            return url
+
+    html_source = entry.get("summary", "") or entry.get("description", "")
+    match = re.search(r'<img[^>]+src=["\']([^"\']+)["\']', html_source, re.I)
+    if match:
+        return html.unescape(match.group(1))
+    return None
+
+
+def translate_title(title):
+    if not TRANSLATE_TITLES or not DEEPL_API_KEY:
+        return title
+    if title in TRANSLATION_CACHE:
+        return TRANSLATION_CACHE[title]
+
+    try:
+        response = requests.post(
+            DEEPL_API_URL,
+            data={
+                "auth_key": DEEPL_API_KEY,
+                "text": title,
+                "target_lang": "PL",
+            },
+            timeout=10,
+        )
+        response.raise_for_status()
+        translated = response.json()["translations"][0]["text"]
+        translated = normalize_text(translated)
+        TRANSLATION_CACHE[title] = translated or title
+        return TRANSLATION_CACHE[title]
+    except Exception as exc:
+        print(f"Błąd tłumaczenia tytułu DeepL: {exc}")
+        return title
 
 
 def item_hash(title, link):
@@ -197,6 +255,7 @@ def fetch_feed_items():
                     "link": link,
                     "summary": summary,
                     "source": source,
+                    "image_url": get_entry_image_url(entry),
                     "score": score,
                     "categories": categories,
                     "timestamp": time.time(),
@@ -223,13 +282,19 @@ async def publish_alert(channel, item):
     link = item["link"]
     if not link.startswith(("http://", "https://")):
         link = None
+    display_title = await asyncio.to_thread(translate_title, item["title"])
     embed = discord.Embed(
-        title=item["title"][:256],
+        title=display_title[:256],
         url=link,
         description=impact_summary(item["title"], item["categories"], item["score"]),
         color=discord.Color.red() if item["score"] >= 85 else discord.Color.orange()
     )
+    if display_title != item["title"]:
+        embed.add_field(name="Oryginalny tytuł", value=item["title"][:1024], inline=False)
     embed.add_field(name="Źródło", value=item["source"][:1024], inline=True)
+    image_url = item.get("image_url")
+    if image_url and image_url.startswith(("http://", "https://")):
+        embed.set_image(url=image_url)
     embed.set_footer(text=f"Crypto News Desk | Europe/Warsaw | {datetime.datetime.now(TZ_POLAND).strftime('%Y-%m-%d %H:%M')}")
     try:
         await channel.send(embed=embed)
@@ -335,9 +400,10 @@ async def publish_digest(channel):
     description_lines = []
     for index, item in enumerate(items, 1):
         categories = ", ".join(item["categories"])
+        media_flag = " | image" if item.get("image_url") else ""
         description_lines.append(
             f"**{index}. [{item['title']}]({item['link']})**\n"
-            f"`{item['score']}/100` | {categories} | {item['source']}"
+            f"`{item['score']}/100` | {categories} | {item['source']}{media_flag}"
         )
     embed = discord.Embed(
         title="Crypto News Digest",
@@ -402,12 +468,12 @@ async def digest_loop():
 @bot.tree.command(name="news_scan", description="Ręcznie skanuje źródła newsów i publikuje ważne alerty.")
 @discord.app_commands.describe(publish_all="Testowo publikuje wszystkie nowe wpisy, ignorując próg score.")
 async def slash_news_scan(interaction: discord.Interaction, publish_all: bool = False):
-    await interaction.response.send_message("Skan uruchomiony. Zaraz podam wynik.", ephemeral=True)
+    await interaction.response.defer(ephemeral=True, thinking=True)
     result = await run_feed_scan(publish=True, publish_all=publish_all, channel_override=interaction.channel)
     if result.get("reason"):
-        await interaction.edit_original_response(content=result["reason"])
+        await interaction.followup.send(content=result["reason"], ephemeral=True)
         return
-    await interaction.edit_original_response(
+    await interaction.followup.send(
         content=(
             f"Przeskanowano źródła.\n"
             f"Pobrane wpisy: `{result['fetched']}`\n"
@@ -417,13 +483,14 @@ async def slash_news_scan(interaction: discord.Interaction, publish_all: bool = 
             f"Limit publikacji na skan: `{result['max_publish']}`\n"
             f"Próg alertu: `{result['threshold']}`"
             + (("\n\nBłędy:\n" + "\n".join(f"- {e}" for e in result["errors"])) if result["errors"] else "")
-        )
+        ),
+        ephemeral=True,
     )
 
 
 @bot.tree.command(name="news_status", description="Pokazuje diagnostykę feedów i pamięci news bota.")
 async def slash_news_status(interaction: discord.Interaction):
-    await interaction.response.send_message("Sprawdzam status news bota...", ephemeral=True)
+    await interaction.response.defer(ephemeral=True, thinking=True)
     channel = bot.get_channel(NEWS_CHANNEL_ID) if NEWS_CHANNEL_ID else None
     access_error = get_channel_access_error(channel) if NEWS_CHANNEL_ID else "Brak NEWS_CHANNEL_ID."
     current_channel_error = get_channel_access_error(interaction.channel)
@@ -443,34 +510,32 @@ async def slash_news_status(interaction: discord.Interaction):
         f"Dostęp do tego kanału: `{current_channel_error or 'OK'}`\n\n"
         + "\n".join(feed_lines)
     )
-    await interaction.edit_original_response(content=message[:1900])
+    await interaction.followup.send(content=message[:1900], ephemeral=True)
 
 
 @bot.tree.command(name="news_reset", description="Czyści pamięć widzianych newsów bota.")
 async def slash_news_reset(interaction: discord.Interaction):
-    await interaction.response.send_message("Czyszczę pamięć widzianych newsów...", ephemeral=True)
+    await interaction.response.defer(ephemeral=True, thinking=True)
     STATE["seen"] = {}
     STATE["digest_items"] = []
     save_state()
-    await interaction.edit_original_response(content="Pamięć widzianych newsów została wyczyszczona. Uruchom `/news_scan` ponownie.")
+    await interaction.followup.send(content="Pamięć widzianych newsów została wyczyszczona. Uruchom `/news_scan` ponownie.", ephemeral=True)
 
 
-@bot.tree.command(name="news_digest", description="Publikuje ręczny digest newsów krypto.")
+@bot.tree.command(name="news_digest", description="Publikuje reczny digest newsow krypto.")
 async def slash_news_digest(interaction: discord.Interaction):
-    await interaction.response.send_message("Publikuję digest newsów...", ephemeral=True)
-    channel = bot.get_channel(NEWS_CHANNEL_ID) if NEWS_CHANNEL_ID else interaction.channel
-    if not channel:
-        channel = interaction.channel
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    channel = interaction.channel
     access_error = get_channel_access_error(channel)
     if access_error:
-        await interaction.edit_original_response(content=access_error)
+        await interaction.followup.send(content=access_error, ephemeral=True)
         return
     try:
         await publish_digest(channel)
-        await interaction.edit_original_response(content="Digest opublikowany.")
+        await interaction.followup.send(content="Digest opublikowany.", ephemeral=True)
     except Exception as exc:
-        print(f"Błąd publikacji digestu: {exc}")
-        await interaction.edit_original_response(content=f"Nie udało się opublikować digestu: {exc}")
+        print(f"Blad publikacji digestu: {exc}")
+        await interaction.followup.send(content=f"Nie udalo sie opublikowac digestu: {exc}", ephemeral=True)
 
 
 def run_discord_bot_sync():

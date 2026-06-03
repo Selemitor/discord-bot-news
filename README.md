@@ -23,6 +23,7 @@ gunicorn crypto_news_bot:app --bind 0.0.0.0:$PORT
 NEWS_BOT_TOKEN=
 NEWS_CHANNEL_ID=
 NEWS_ALERT_SCORE_THRESHOLD=70
+NEWS_MAX_PUBLISH_PER_SCAN=5
 NEWS_DIGEST_HOURS=9,21
 NEWS_FEED_POLL_MINUTES=10
 NEWS_STATE_FILE=crypto_news_state.json
@@ -73,6 +74,8 @@ Do testów można użyć:
 ```text
 /news_scan publish_all:true
 ```
+
+Domyślnie jeden skan publikuje maksymalnie 5 alertów. Limit zmienisz przez `NEWS_MAX_PUBLISH_PER_SCAN`.
 
 ## Ważne
 

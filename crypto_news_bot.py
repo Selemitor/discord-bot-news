@@ -35,6 +35,7 @@ def health_check():
 BOT_TOKEN = os.environ.get("NEWS_BOT_TOKEN") or os.environ.get("BOT_TOKEN")
 NEWS_CHANNEL_ID = int(os.environ.get("NEWS_CHANNEL_ID", "0"))
 ALERT_SCORE_THRESHOLD = int(os.environ.get("NEWS_ALERT_SCORE_THRESHOLD", "70"))
+MAX_PUBLISH_PER_SCAN = int(os.environ.get("NEWS_MAX_PUBLISH_PER_SCAN", "5"))
 DIGEST_HOURS = [int(h) for h in os.environ.get("NEWS_DIGEST_HOURS", "9,21").split(",") if h.strip()]
 FEED_POLL_MINUTES = int(os.environ.get("NEWS_FEED_POLL_MINUTES", "10"))
 STATE_FILE = Path(os.environ.get("NEWS_STATE_FILE", "crypto_news_state.json"))
@@ -230,7 +231,7 @@ async def publish_alert(channel, item):
     await channel.send(embed=embed)
 
 
-async def run_feed_scan(publish=True, publish_all=False):
+async def run_feed_scan(publish=True, publish_all=False, max_publish=MAX_PUBLISH_PER_SCAN):
     if not NEWS_CHANNEL_ID:
         print("Brak NEWS_CHANNEL_ID. Pomijam publikację newsów.")
         return {"fetched": 0, "new": 0, "published": 0, "reason": "Brak NEWS_CHANNEL_ID."}
@@ -248,7 +249,7 @@ async def run_feed_scan(publish=True, publish_all=False):
         STATE.setdefault("seen", {})[item["id"]] = time.time()
         remember_for_digest(item)
         new_items.append(item)
-        if publish and (publish_all or item["score"] >= ALERT_SCORE_THRESHOLD):
+        if publish and published < max_publish and (publish_all or item["score"] >= ALERT_SCORE_THRESHOLD):
             await publish_alert(channel, item)
             published += 1
             await asyncio.sleep(1)
@@ -257,6 +258,7 @@ async def run_feed_scan(publish=True, publish_all=False):
         "fetched": len(fetched_items),
         "new": len(new_items),
         "published": published,
+        "max_publish": max_publish,
         "threshold": ALERT_SCORE_THRESHOLD,
         "reason": None,
     }
@@ -304,6 +306,19 @@ async def on_ready():
         print(f"Błąd synchronizacji komend news bota: {exc}")
 
 
+@bot.tree.error
+async def on_app_command_error(interaction: discord.Interaction, error):
+    print(f"Błąd komendy slash news bota: {error}")
+    message = "Wystąpił błąd komendy. Szczegóły są w logach Render."
+    try:
+        if interaction.response.is_done():
+            await interaction.followup.send(message, ephemeral=True)
+        else:
+            await interaction.response.send_message(message, ephemeral=True)
+    except Exception as exc:
+        print(f"Nie udało się wysłać komunikatu błędu Discord: {exc}")
+
+
 @tasks.loop(minutes=FEED_POLL_MINUTES)
 async def feed_scan_loop():
     await run_feed_scan(publish=True)
@@ -330,30 +345,31 @@ async def digest_loop():
 @bot.tree.command(name="news_scan", description="Ręcznie skanuje źródła newsów i publikuje ważne alerty.")
 @discord.app_commands.describe(publish_all="Testowo publikuje wszystkie nowe wpisy, ignorując próg score.")
 async def slash_news_scan(interaction: discord.Interaction, publish_all: bool = False):
-    await interaction.response.defer(thinking=True, ephemeral=True)
+    await interaction.response.send_message("Skan uruchomiony. Zaraz podam wynik.", ephemeral=True)
     result = await run_feed_scan(publish=True, publish_all=publish_all)
     if result.get("reason"):
-        await interaction.followup.send(result["reason"], ephemeral=True)
+        await interaction.edit_original_response(content=result["reason"])
         return
-    await interaction.followup.send(
-        (
+    await interaction.edit_original_response(
+        content=(
             f"Przeskanowano źródła.\n"
             f"Pobrane wpisy: `{result['fetched']}`\n"
             f"Nowe wpisy: `{result['new']}`\n"
             f"Opublikowane alerty: `{result['published']}`\n"
+            f"Limit publikacji na skan: `{result['max_publish']}`\n"
             f"Próg alertu: `{result['threshold']}`"
-        ),
-        ephemeral=True
+        )
     )
 
 
 @bot.tree.command(name="news_status", description="Pokazuje diagnostykę feedów i pamięci news bota.")
 async def slash_news_status(interaction: discord.Interaction):
-    await interaction.response.defer(thinking=True, ephemeral=True)
-    await asyncio.to_thread(fetch_feed_items)
+    await interaction.response.send_message("Sprawdzam status news bota...", ephemeral=True)
     feed_lines = []
     for feed in FEED_STATS.get("feeds", [])[:8]:
         feed_lines.append(f"- `{feed['entries']}` wpisów | {feed['status']} | {feed['source']}")
+    if not feed_lines:
+        feed_lines.append("- Brak danych z ostatniego skanu. Użyj `/news_scan` albo poczekaj na automatyczny skan.")
     message = (
         f"NEWS_CHANNEL_ID: `{NEWS_CHANNEL_ID}`\n"
         f"Próg alertu: `{ALERT_SCORE_THRESHOLD}`\n"
@@ -363,30 +379,30 @@ async def slash_news_status(interaction: discord.Interaction):
         f"Ostatni skan: `{FEED_STATS.get('last_scan')}`\n\n"
         + "\n".join(feed_lines)
     )
-    await interaction.followup.send(message[:1900], ephemeral=True)
+    await interaction.edit_original_response(content=message[:1900])
 
 
 @bot.tree.command(name="news_reset", description="Czyści pamięć widzianych newsów bota.")
 async def slash_news_reset(interaction: discord.Interaction):
-    await interaction.response.defer(thinking=True, ephemeral=True)
+    await interaction.response.send_message("Czyszczę pamięć widzianych newsów...", ephemeral=True)
     STATE["seen"] = {}
     STATE["digest_items"] = []
     save_state()
-    await interaction.followup.send("Pamięć widzianych newsów została wyczyszczona. Uruchom `/news_scan` ponownie.", ephemeral=True)
+    await interaction.edit_original_response(content="Pamięć widzianych newsów została wyczyszczona. Uruchom `/news_scan` ponownie.")
 
 
 @bot.tree.command(name="news_digest", description="Publikuje ręczny digest newsów krypto.")
 async def slash_news_digest(interaction: discord.Interaction):
-    await interaction.response.defer(thinking=True, ephemeral=True)
+    await interaction.response.send_message("Publikuję digest newsów...", ephemeral=True)
     if not NEWS_CHANNEL_ID:
-        await interaction.followup.send("Brak NEWS_CHANNEL_ID.", ephemeral=True)
+        await interaction.edit_original_response(content="Brak NEWS_CHANNEL_ID.")
         return
     channel = bot.get_channel(NEWS_CHANNEL_ID)
     if not channel:
-        await interaction.followup.send("Nie znaleziono kanału newsowego.", ephemeral=True)
+        await interaction.edit_original_response(content="Nie znaleziono kanału newsowego.")
         return
     await publish_digest(channel)
-    await interaction.followup.send("Digest opublikowany.", ephemeral=True)
+    await interaction.edit_original_response(content="Digest opublikowany.")
 
 
 def run_discord_bot_sync():

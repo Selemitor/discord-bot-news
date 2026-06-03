@@ -9,7 +9,7 @@ Osobny bot Discord do filtrowania i publikowania najważniejszych newsów z rynk
 - deduplikacja newsów,
 - alerty tylko powyżej progu ważności,
 - digest o wybranych godzinach,
-- komendy `/news_scan` i `/news_digest`.
+- komendy `/news_scan`, `/news_digest`, `/news_status`, `/news_reset`.
 
 ## Start command na Render
 
@@ -51,6 +51,27 @@ NEWS_FEEDS=https://www.coindesk.com/arc/outboundfeeds/rss/,https://cointelegraph
 
 ```text
 pip install -r requirements.txt
+```
+
+## Diagnostyka
+
+Jeśli `/news_scan` pokazuje `Nowe wpisy: 0`, użyj:
+
+```text
+/news_status
+```
+
+Jeśli feedy pobierają wpisy, ale bot ma je już w pamięci, wyczyść pamięć:
+
+```text
+/news_reset
+/news_scan
+```
+
+Do testów można użyć:
+
+```text
+/news_scan publish_all:true
 ```
 
 ## Ważne

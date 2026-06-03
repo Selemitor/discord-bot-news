@@ -45,7 +45,8 @@ DEFAULT_FEEDS = [
     "https://www.coindesk.com/arc/outboundfeeds/rss/",
     "https://cointelegraph.com/rss",
     "https://decrypt.co/feed",
-    "https://www.binance.com/en/support/announcement/rss",
+    "https://cryptoslate.com/feed/",
+    "https://bitcoinmagazine.com/.rss/full/",
 ]
 
 NEWS_FEEDS = [
@@ -60,6 +61,7 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 
 STATE = {"seen": {}, "digest_items": [], "last_digest": {}}
+FEED_STATS = {"last_scan": None, "feeds": [], "fetched": 0}
 
 
 CATEGORY_RULES = {
@@ -169,7 +171,9 @@ def impact_summary(title, categories, score):
 
 
 def fetch_feed_items():
+    global FEED_STATS
     items = []
+    feed_stats = []
     headers = {"User-Agent": "CryptoNewsDeskBot/1.0"}
     for feed_url in NEWS_FEEDS:
         try:
@@ -177,6 +181,8 @@ def fetch_feed_items():
             response.raise_for_status()
             parsed = feedparser.parse(response.content)
             source = parsed.feed.get("title", feed_url)
+            entry_count = len(parsed.entries)
+            feed_stats.append({"url": feed_url, "source": source, "entries": entry_count, "status": "ok"})
             for entry in parsed.entries[:10]:
                 title = normalize_text(entry.get("title", ""))
                 link = normalize_text(entry.get("link", ""))
@@ -195,7 +201,13 @@ def fetch_feed_items():
                     "timestamp": time.time(),
                 })
         except Exception as exc:
+            feed_stats.append({"url": feed_url, "source": feed_url, "entries": 0, "status": f"error: {exc}"})
             print(f"Błąd pobierania feedu {feed_url}: {exc}")
+    FEED_STATS = {
+        "last_scan": datetime.datetime.now(TZ_POLAND).strftime("%Y-%m-%d %H:%M:%S"),
+        "feeds": feed_stats,
+        "fetched": len(items),
+    }
     return sorted(items, key=lambda item: item["score"], reverse=True)
 
 
@@ -218,27 +230,36 @@ async def publish_alert(channel, item):
     await channel.send(embed=embed)
 
 
-async def run_feed_scan(publish=True):
+async def run_feed_scan(publish=True, publish_all=False):
     if not NEWS_CHANNEL_ID:
         print("Brak NEWS_CHANNEL_ID. Pomijam publikację newsów.")
-        return []
+        return {"fetched": 0, "new": 0, "published": 0, "reason": "Brak NEWS_CHANNEL_ID."}
     channel = bot.get_channel(NEWS_CHANNEL_ID)
     if not channel:
         print(f"Nie znaleziono kanału NEWS_CHANNEL_ID={NEWS_CHANNEL_ID}.")
-        return []
+        return {"fetched": 0, "new": 0, "published": 0, "reason": "Nie znaleziono kanału newsowego."}
     cleanup_state()
+    fetched_items = await asyncio.to_thread(fetch_feed_items)
     new_items = []
-    for item in await asyncio.to_thread(fetch_feed_items):
+    published = 0
+    for item in fetched_items:
         if item["id"] in STATE.get("seen", {}):
             continue
         STATE.setdefault("seen", {})[item["id"]] = time.time()
         remember_for_digest(item)
         new_items.append(item)
-        if publish and item["score"] >= ALERT_SCORE_THRESHOLD:
+        if publish and (publish_all or item["score"] >= ALERT_SCORE_THRESHOLD):
             await publish_alert(channel, item)
+            published += 1
             await asyncio.sleep(1)
     save_state()
-    return new_items
+    return {
+        "fetched": len(fetched_items),
+        "new": len(new_items),
+        "published": published,
+        "threshold": ALERT_SCORE_THRESHOLD,
+        "reason": None,
+    }
 
 
 def build_digest_items():
@@ -307,10 +328,51 @@ async def digest_loop():
 
 
 @bot.tree.command(name="news_scan", description="Ręcznie skanuje źródła newsów i publikuje ważne alerty.")
-async def slash_news_scan(interaction: discord.Interaction):
+@discord.app_commands.describe(publish_all="Testowo publikuje wszystkie nowe wpisy, ignorując próg score.")
+async def slash_news_scan(interaction: discord.Interaction, publish_all: bool = False):
     await interaction.response.defer(thinking=True, ephemeral=True)
-    items = await run_feed_scan(publish=True)
-    await interaction.followup.send(f"Przeskanowano źródła. Nowe newsy: {len(items)}.", ephemeral=True)
+    result = await run_feed_scan(publish=True, publish_all=publish_all)
+    if result.get("reason"):
+        await interaction.followup.send(result["reason"], ephemeral=True)
+        return
+    await interaction.followup.send(
+        (
+            f"Przeskanowano źródła.\n"
+            f"Pobrane wpisy: `{result['fetched']}`\n"
+            f"Nowe wpisy: `{result['new']}`\n"
+            f"Opublikowane alerty: `{result['published']}`\n"
+            f"Próg alertu: `{result['threshold']}`"
+        ),
+        ephemeral=True
+    )
+
+
+@bot.tree.command(name="news_status", description="Pokazuje diagnostykę feedów i pamięci news bota.")
+async def slash_news_status(interaction: discord.Interaction):
+    await interaction.response.defer(thinking=True, ephemeral=True)
+    await asyncio.to_thread(fetch_feed_items)
+    feed_lines = []
+    for feed in FEED_STATS.get("feeds", [])[:8]:
+        feed_lines.append(f"- `{feed['entries']}` wpisów | {feed['status']} | {feed['source']}")
+    message = (
+        f"NEWS_CHANNEL_ID: `{NEWS_CHANNEL_ID}`\n"
+        f"Próg alertu: `{ALERT_SCORE_THRESHOLD}`\n"
+        f"Feedów: `{len(NEWS_FEEDS)}`\n"
+        f"Pobrane wpisy ostatnio: `{FEED_STATS.get('fetched', 0)}`\n"
+        f"Widziane wpisy w pamięci: `{len(STATE.get('seen', {}))}`\n"
+        f"Ostatni skan: `{FEED_STATS.get('last_scan')}`\n\n"
+        + "\n".join(feed_lines)
+    )
+    await interaction.followup.send(message[:1900], ephemeral=True)
+
+
+@bot.tree.command(name="news_reset", description="Czyści pamięć widzianych newsów bota.")
+async def slash_news_reset(interaction: discord.Interaction):
+    await interaction.response.defer(thinking=True, ephemeral=True)
+    STATE["seen"] = {}
+    STATE["digest_items"] = []
+    save_state()
+    await interaction.followup.send("Pamięć widzianych newsów została wyczyszczona. Uruchom `/news_scan` ponownie.", ephemeral=True)
 
 
 @bot.tree.command(name="news_digest", description="Publikuje ręczny digest newsów krypto.")

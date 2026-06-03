@@ -56,6 +56,8 @@ pip install -r requirements.txt
 
 ## Diagnostyka
 
+`NEWS_CHANNEL_ID` jest potrzebny do automatycznego skanu i digestu. Ręczne `/news_scan` oraz `/news_digest` publikują w kanale, w którym wywołujesz komendę, jeśli `NEWS_CHANNEL_ID` jest błędny lub pusty.
+
 Jeśli `/news_scan` pokazuje `Nowe wpisy: 0`, użyj:
 
 ```text

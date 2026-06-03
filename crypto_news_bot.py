@@ -242,14 +242,39 @@ async def publish_alert(channel, item):
         await channel.send(text[:1900])
 
 
+def get_channel_access_error(channel):
+    if not channel:
+        return "Nie znaleziono kanału newsowego. Sprawdź `NEWS_CHANNEL_ID`."
+    if not getattr(channel, "guild", None):
+        return None
+
+    member = channel.guild.get_member(bot.user.id) if bot.user else None
+    if not member:
+        return "Bot nie jest członkiem serwera, na którym znajduje się kanał newsowy."
+
+    permissions = channel.permissions_for(member)
+    missing = []
+    if not permissions.view_channel:
+        missing.append("View Channel")
+    if not permissions.send_messages:
+        missing.append("Send Messages")
+    if not permissions.embed_links:
+        missing.append("Embed Links")
+
+    if missing:
+        return "Bot nie ma wymaganych uprawnień na kanale newsowym: " + ", ".join(missing) + "."
+    return None
+
+
 async def run_feed_scan(publish=True, publish_all=False, max_publish=MAX_PUBLISH_PER_SCAN):
     if not NEWS_CHANNEL_ID:
         print("Brak NEWS_CHANNEL_ID. Pomijam publikację newsów.")
         return {"fetched": 0, "new": 0, "published": 0, "reason": "Brak NEWS_CHANNEL_ID."}
     channel = bot.get_channel(NEWS_CHANNEL_ID)
-    if not channel:
-        print(f"Nie znaleziono kanału NEWS_CHANNEL_ID={NEWS_CHANNEL_ID}.")
-        return {"fetched": 0, "new": 0, "published": 0, "reason": "Nie znaleziono kanału newsowego."}
+    access_error = get_channel_access_error(channel)
+    if access_error:
+        print(f"Problem dostępu do kanału NEWS_CHANNEL_ID={NEWS_CHANNEL_ID}: {access_error}")
+        return {"fetched": 0, "new": 0, "published": 0, "reason": access_error}
     cleanup_state()
     fetched_items = await asyncio.to_thread(fetch_feed_items)
     new_items = []
@@ -292,6 +317,10 @@ def build_digest_items():
 
 
 async def publish_digest(channel):
+    access_error = get_channel_access_error(channel)
+    if access_error:
+        raise PermissionError(access_error)
+
     items = build_digest_items()
     if not items:
         await channel.send("Brak istotnych newsów krypto do digestu.")
@@ -388,6 +417,8 @@ async def slash_news_scan(interaction: discord.Interaction, publish_all: bool = 
 @bot.tree.command(name="news_status", description="Pokazuje diagnostykę feedów i pamięci news bota.")
 async def slash_news_status(interaction: discord.Interaction):
     await interaction.response.send_message("Sprawdzam status news bota...", ephemeral=True)
+    channel = bot.get_channel(NEWS_CHANNEL_ID) if NEWS_CHANNEL_ID else None
+    access_error = get_channel_access_error(channel) if NEWS_CHANNEL_ID else "Brak NEWS_CHANNEL_ID."
     feed_lines = []
     for feed in FEED_STATS.get("feeds", [])[:8]:
         feed_lines.append(f"- `{feed['entries']}` wpisów | {feed['status']} | {feed['source']}")
@@ -400,6 +431,7 @@ async def slash_news_status(interaction: discord.Interaction):
         f"Pobrane wpisy ostatnio: `{FEED_STATS.get('fetched', 0)}`\n"
         f"Widziane wpisy w pamięci: `{len(STATE.get('seen', {}))}`\n"
         f"Ostatni skan: `{FEED_STATS.get('last_scan')}`\n\n"
+        f"Dostęp do kanału: `{access_error or 'OK'}`\n\n"
         + "\n".join(feed_lines)
     )
     await interaction.edit_original_response(content=message[:1900])
@@ -421,11 +453,16 @@ async def slash_news_digest(interaction: discord.Interaction):
         await interaction.edit_original_response(content="Brak NEWS_CHANNEL_ID.")
         return
     channel = bot.get_channel(NEWS_CHANNEL_ID)
-    if not channel:
-        await interaction.edit_original_response(content="Nie znaleziono kanału newsowego.")
+    access_error = get_channel_access_error(channel)
+    if access_error:
+        await interaction.edit_original_response(content=access_error)
         return
-    await publish_digest(channel)
-    await interaction.edit_original_response(content="Digest opublikowany.")
+    try:
+        await publish_digest(channel)
+        await interaction.edit_original_response(content="Digest opublikowany.")
+    except Exception as exc:
+        print(f"Błąd publikacji digestu: {exc}")
+        await interaction.edit_original_response(content=f"Nie udało się opublikować digestu: {exc}")
 
 
 def run_discord_bot_sync():

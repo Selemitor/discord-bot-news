@@ -10,7 +10,7 @@ Osobny bot Discord do filtrowania i publikowania najważniejszych newsów z rynk
 - alerty tylko powyżej progu ważności,
 - obrazki z RSS, jeśli źródło je udostępnia,
 - opcjonalne tłumaczenie tytułów przez DeepL,
-- digest o wybranych godzinach,
+- digest o wybranych godzinach; bot wysyła go raz w danej godzinie, nawet jeśli Render wystartuje po minucie 00,
 - komendy `/news_scan`, `/news_digest`, `/news_status`, `/news_reset`.
 
 ## Start command na Render

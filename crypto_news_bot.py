@@ -452,17 +452,22 @@ async def digest_loop():
     if not NEWS_CHANNEL_ID:
         return
     now = datetime.datetime.now(TZ_POLAND)
-    if now.minute != 0 or now.hour not in DIGEST_HOURS:
+    if now.hour not in DIGEST_HOURS:
         return
     key = now.strftime("%Y-%m-%d-%H")
     if STATE.get("last_digest", {}).get("key") == key:
         return
     channel = bot.get_channel(NEWS_CHANNEL_ID)
     if not channel:
+        print(f"Nie znaleziono kanału digestu NEWS_CHANNEL_ID={NEWS_CHANNEL_ID}.")
         return
-    await publish_digest(channel)
-    STATE["last_digest"] = {"key": key, "timestamp": time.time()}
-    save_state()
+    try:
+        await publish_digest(channel)
+        STATE["last_digest"] = {"key": key, "timestamp": time.time()}
+        save_state()
+        print(f"Digest automatyczny opublikowany dla okna {key}.")
+    except Exception as exc:
+        print(f"Błąd automatycznego digestu dla okna {key}: {exc}")
 
 
 @bot.tree.command(name="news_scan", description="Ręcznie skanuje źródła newsów i publikuje ważne alerty.")

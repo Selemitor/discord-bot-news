@@ -554,10 +554,13 @@ def run_discord_bot_sync():
     except Exception as exc:
         print(f"Krytyczny błąd news bota: {exc}")
     finally:
-        loop.run_until_complete(bot.close())
+        try:
+            loop.run_until_complete(bot.close())
+        except Exception as exc:
+            print(f"Błąd zamykania news bota: {exc}")
         loop.close()
 
 
 print("Inicjalizacja wątku Crypto News Desk...")
-bot_thread = Thread(target=run_discord_bot_sync)
+bot_thread = Thread(target=run_discord_bot_sync, daemon=True)
 bot_thread.start()
